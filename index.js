@@ -20,26 +20,17 @@ const IGNORED_TASK_DEFINITION_ATTRIBUTES = [
   'registeredBy'
 ];
 
-// Deploy to a service that uses the 'ECS' deployment controller
-async function updateEcsService(ecs, clusterName, service, taskDefArn, waitForService, waitForMinutes, forceNewDeployment) {
-  core.debug('Updating the service');
-  await ecs.updateService({
-    cluster: clusterName,
-    service: service,
-    taskDefinition: taskDefArn,
-    forceNewDeployment: forceNewDeployment
-  }).promise();
-
+async function postProcessService(ecs, clusterName, serviceName, waitForService, waitForMinutes) {
   const consoleHostname = aws.config.region.startsWith('cn') ? 'console.amazonaws.cn' : 'console.aws.amazon.com';
 
-  core.info(`Deployment started. Watch this deployment's progress in the Amazon ECS console: https://${consoleHostname}/ecs/home?region=${aws.config.region}#/clusters/${clusterName}/services/${service}/events`);
+  core.info(`Deployment started. Watch this deployment's progress in the Amazon ECS console: https://${consoleHostname}/ecs/home?region=${aws.config.region}#/clusters/${clusterName}/services/${serviceName}/events`);
 
   // Wait for service stability
   if (waitForService && waitForService.toLowerCase() === 'true') {
     core.debug(`Waiting for the service to become stable. Will wait for ${waitForMinutes} minutes`);
     const maxAttempts = (waitForMinutes * 60) / WAIT_DEFAULT_DELAY_SEC;
     await ecs.waitFor('servicesStable', {
-      services: [service],
+      services: [serviceName],
       cluster: clusterName,
       $waiter: {
         delay: WAIT_DEFAULT_DELAY_SEC,
@@ -49,6 +40,38 @@ async function updateEcsService(ecs, clusterName, service, taskDefArn, waitForSe
   } else {
     core.debug('Not waiting for the service to become stable');
   }
+}
+
+async function updateEcsService(ecs, clusterName, serviceName, taskDefArn, waitForService, waitForMinutes, forceNewDeployment) {
+  core.debug('Updating the service');
+  await ecs.updateService({
+    cluster: clusterName,
+    service: serviceName,
+    taskDefinition: taskDefArn,
+    forceNewDeployment: forceNewDeployment
+  }).promise();
+
+  await postProcessService(ecs, clusterName, serviceName, waitForService, waitForMinutes);
+}
+
+async function createEcsService(ecs, clusterName, serviceName, taskDefArn, serviceConfig, waitForService, waitForMinutes) {
+  core.debug('Creating the service');
+  await ecs.createService({
+    ...serviceConfig,
+    cluster: clusterName,
+    serviceName,
+    taskDefinition: taskDefArn,
+  }).promise();
+
+  await postProcessService(ecs, clusterName, serviceName, waitForService, waitForMinutes);
+}
+
+function validateDeploymentController(config) {
+  if (!config.deploymentController || !config.deploymentController.type) return;
+
+  if (['CODE_DEPLOY', 'ECS'].includes(config.deploymentController.type)) return;
+
+  throw new Error(`Unsupported deployment controller: ${config.deploymentController.type}`);
 }
 
 // Find value in a CodeDeploy AppSpec file with a case-insensitive key
@@ -258,7 +281,6 @@ async function run() {
 
     // Get inputs
     const taskDefinitionFile = core.getInput('task-definition', { required: true });
-    const service = core.getInput('service', { required: false });
     const cluster = core.getInput('cluster', { required: false });
     const waitForService = core.getInput('wait-for-service-stability', { required: false });
     let waitForMinutes = parseInt(core.getInput('wait-for-minutes', { required: false })) || 30;
@@ -268,6 +290,17 @@ async function run() {
 
     const forceNewDeployInput = core.getInput('force-new-deployment', { required: false }) || 'false';
     const forceNewDeployment = forceNewDeployInput.toLowerCase() === 'true';
+
+    const createServiceIfNotFoundInput = core.getInput('create-service-if-not-found', { required: false }) || 'false';
+    const createServiceIfNotFound = createServiceIfNotFoundInput.toLowerCase() === 'true';
+    const serviceInput = core.getInput('service', { required: createServiceIfNotFound });
+    const serviceConfigFile = core.getInput('service-config-file', { required: createServiceIfNotFound });
+
+    const serviceConfigPath = serviceConfigFile && (path.isAbsolute(serviceConfigFile) ?
+      serviceConfigFile :
+      path.join(process.env.GITHUB_WORKSPACE, serviceConfigFile));
+    const serviceFileContents = serviceConfigPath && fs.readFileSync(serviceConfigPath, 'utf8');
+    const serviceConfig = serviceFileContents && JSON.parse(serviceFileContents);
 
     // Register the task definition
     core.debug('Registering the task definition');
@@ -288,38 +321,40 @@ async function run() {
     const taskDefArn = registerResponse.taskDefinition.taskDefinitionArn;
     core.setOutput('task-definition-arn', taskDefArn);
 
-    // Update the service with the new task definition
-    if (service) {
-      const clusterName = cluster ? cluster : 'default';
+    const clusterName = cluster ? cluster : 'default';
 
-      // Determine the deployment controller
-      const describeResponse = await ecs.describeServices({
-        services: [service],
-        cluster: clusterName
-      }).promise();
-
-      if (describeResponse.failures && describeResponse.failures.length > 0) {
-        const failure = describeResponse.failures[0];
-        throw new Error(`${failure.arn} is ${failure.reason}`);
-      }
-
-      const serviceResponse = describeResponse.services[0];
-      if (serviceResponse.status != 'ACTIVE') {
-        throw new Error(`Service is ${serviceResponse.status}`);
-      }
-
-      if (!serviceResponse.deploymentController || !serviceResponse.deploymentController.type || serviceResponse.deploymentController.type === 'ECS') {
-        // Service uses the 'ECS' deployment controller, so we can call UpdateService
-        await updateEcsService(ecs, clusterName, service, taskDefArn, waitForService, waitForMinutes, forceNewDeployment);
-      } else if (serviceResponse.deploymentController.type === 'CODE_DEPLOY') {
-        // Service uses CodeDeploy, so we should start a CodeDeploy deployment
-        await createCodeDeployDeployment(codedeploy, clusterName, service, taskDefArn, waitForService, waitForMinutes);
-      } else {
-        throw new Error(`Unsupported deployment controller: ${serviceResponse.deploymentController.type}`);
-      }
-    } else {
+    if (!serviceInput) {
       core.debug('Service was not specified, no service updated');
+      return;
     }
+
+    const { services, failures } = await ecs.describeServices({cluster, services: [serviceInput]}).promise();
+    const [service] = services;
+    const [failure] = failures;
+
+    if (!serviceConfig) {
+      const createInfo = "If you want the service to be created, enable the 'create-service-if-not-found' input field.";
+      if (failure) throw new Error(`${failure.arn} is ${failure.reason}. ${failure.reason === 'MISSING' ? createInfo : ''}`);
+
+      if (service.status != 'ACTIVE') throw new Error(`Service is ${service.status}`);
+    }
+
+    const config = service || serviceConfig;
+
+    validateDeploymentController(config);
+
+    if (!service) {
+      await createEcsService(ecs, clusterName, serviceInput, taskDefArn, serviceConfig, waitForService, waitForMinutes);
+    }
+
+    if (config.deploymentController && config.deploymentController.type === 'CODE_DEPLOY') {
+      await createCodeDeployDeployment(codedeploy, clusterName, serviceInput, taskDefArn, waitForService, waitForMinutes);
+      return;
+    }
+
+    if (service) {
+      await updateEcsService(ecs, clusterName, serviceInput, taskDefArn, waitForService, waitForMinutes, forceNewDeployment);
+    }   
   }
   catch (error) {
     core.setFailed(error.message);
