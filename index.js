@@ -51,6 +51,8 @@ async function updateEcsService(ecs, clusterName, serviceName, taskDefArn, waitF
     forceNewDeployment: forceNewDeployment
   }).promise();
 
+  core.info(`Service '${serviceName}' updated successfully.`)
+
   await postProcessService(ecs, clusterName, serviceName, waitForService, waitForMinutes);
 }
 
@@ -62,6 +64,8 @@ async function createEcsService(ecs, clusterName, serviceName, taskDefArn, servi
     serviceName,
     taskDefinition: taskDefArn,
   }).promise();
+
+  core.info(`Service '${serviceName}' created successfully.`)
 
   await postProcessService(ecs, clusterName, serviceName, waitForService, waitForMinutes);
 }
