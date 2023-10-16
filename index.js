@@ -300,6 +300,10 @@ async function run() {
     const serviceInput = core.getInput('service', { required: createServiceIfNotFound });
     const serviceConfigFile = core.getInput('service-config-file', { required: createServiceIfNotFound });
 
+    if (serviceConfigFile && !createServiceIfNotFound) {
+      throw new Error(`Input 'service-config-file' is required only if 'create-service-if-not-found' is true.`); 
+    }
+
     const serviceConfigPath = serviceConfigFile && (path.isAbsolute(serviceConfigFile) ?
       serviceConfigFile :
       path.join(process.env.GITHUB_WORKSPACE, serviceConfigFile));
