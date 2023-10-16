@@ -1,0 +1,25 @@
+name: deploy-app
+
+on:
+  push:
+    branches: 
+      - '**'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: Intall Dependencies
+        run: npm install
+
+      - name: Build Action
+        run: yarn package
+
+      - name: Run auto-commit
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: build script with git-auto-commit
