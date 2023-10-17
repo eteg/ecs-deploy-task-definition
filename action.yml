@@ -8,7 +8,13 @@ inputs:
     description: 'The path to the ECS task definition file to register'
     required: true
   service:
-    description: 'The name of the ECS service to deploy to. The action will only register the task definition if no service is given.'
+    description: "The name of the ECS service to deploy to. The action will only register the task definition if no service is given. Required only if 'create-service-if-not-found' is 'true'"
+    required: false
+  create-service-if-not-found:
+    description: 'Whether to create service if the provided one is not created. Valid value is "true". The fields "service" and "service-config-file" will become required.'
+    required: false
+  service-config-file:
+    description: "The path to the ECS service config file JSON file. See [Create Service Reference](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_CreateService.html). The fields 'cluster', 'serviceName' and 'taskDefinition' will be set/replaced with the respective values from this action inputs. Required only if 'create-service-if-not-found' is 'true'"
     required: false
   cluster:
     description: "The name of the ECS service's cluster.  Will default to the 'default' cluster"
